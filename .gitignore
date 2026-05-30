@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+
+# SQLite database
+expenses.db
+
+# Dash / local environment files
+.env
+.env.*
+*.log
+
+# Mac / Editor temporary files
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Build / distribution
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Raw expense data for privacy
+raw/*
+!raw/.gitkeep
+
+
+#old readme
+old_readme.md

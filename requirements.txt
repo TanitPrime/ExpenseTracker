@@ -1,0 +1,7 @@
+dash
+dash-bootstrap-components
+dash-ag-grid
+plotly
+wordcloud
+python-dotenv
+psycopg2-binary
