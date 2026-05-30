@@ -7,7 +7,7 @@ from dash import html, dcc, Input, Output, State, callback
 import dash_bootstrap_components as dbc
 from ingestion.pipeline import ingest_file
 from db.init_db import reset_db
-from db.queries import get_conn, get_conflict_count
+from db.queries import get_conn, get_conflict_count, get_all_expenses
 import traceback
 
 db_path_raw = os.getenv("DATABASE_URL")
@@ -44,7 +44,8 @@ def layout():
     ])
 
 @callback(
-    Output("ingest-output", "children"),
+    Output("ingest-output", "children", allow_duplicate=True),
+    Output("all-expenses", "data", allow_duplicate=True),
     Input("upload-file", "contents"),
     State("upload-file", "filename"),
     State("admin-authorized", "data"),
@@ -52,7 +53,7 @@ def layout():
 )
 def upload_and_ingest(contents, filename, admin_authorized):
     if not admin_authorized:
-        return dbc.Alert("❌ Unauthorized. Please unlock admin access first.", color="danger", duration=4000)
+        return dbc.Alert("❌ Unauthorized. Please unlock admin access first.", color="danger", duration=4000), dash.no_update
     
     if contents is None or filename is None:
         return dash.no_update
@@ -65,7 +66,7 @@ def upload_and_ingest(contents, filename, admin_authorized):
         # Ingest from memory
         summary = ingest_file(DB_PATH, decoded_bytes, filename)
     except Exception as e:
-        return dbc.Alert(f"❌ Error processing file: {traceback.format_exc()}", color="danger")
+        return dbc.Alert(f"❌ Error processing file: {traceback.format_exc()}", color="danger"), dash.no_update
 
     # Build result display
     if summary["status"] == "stale":
@@ -88,6 +89,8 @@ def upload_and_ingest(contents, filename, admin_authorized):
     # Get conflict badge
     conn = get_conn(DB_PATH)
     conflict_count = get_conflict_count(conn)
+    # Refresh all expenses
+    all_rows = [dict(r) for r in get_all_expenses(conn)]
     conn.close()
 
     badge = dbc.Alert(
@@ -98,26 +101,28 @@ def upload_and_ingest(contents, filename, admin_authorized):
     return html.Div([
         dbc.Alert(result_msg, color=color),
         badge,
-    ])
+    ]), all_rows
 
 @callback(
     Output("ingest-output", "children", allow_duplicate=True),
+    Output("all-expenses", "data", allow_duplicate=True),
     Input("btn-reset-db", "n_clicks"),
     State("admin-authorized", "data"),
     prevent_initial_call=True
 )
 def reset_database(n_clicks, admin_authorized):
     if not admin_authorized:
-        return dbc.Alert("❌ Unauthorized. Please unlock admin access first.", color="danger", duration=4000)
+        return dbc.Alert("❌ Unauthorized. Please unlock admin access first.", color="danger", duration=4000), dash.no_update
     
     try:
         reset_db(DB_PATH)
+        # return empty store after reset
         return dbc.Alert(
             "🧨 Database has been reset. All expenses and conflicts were cleared.",
             color="info"
-        )
+        ), []
     except Exception as e:
-        return dbc.Alert(f"❌ Error resetting database: {str(e)}", color="danger")
+        return dbc.Alert(f"❌ Error resetting database: {str(e)}", color="danger"), dash.no_update
 
     conn = get_conn(DB_PATH)
     conflict_count = get_conflict_count(conn)

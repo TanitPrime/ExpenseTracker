@@ -1,20 +1,19 @@
 from collections import Counter
 import statistics
 from datetime import date, datetime, timedelta
-from typing import cast
-from dash import html, dcc, Input, Output, callback
+from dash import html, dcc, Input, Output, State, callback
 import dash_bootstrap_components as dbc
 from plotly import graph_objects as go
 from wordcloud import WordCloud
 import io
 import base64
-import os
-from db.queries import get_conn, get_distinct_years, get_distinct_months, get_expense_stats_rows
+from typing import Optional
+import pandas as pd
+from typing import cast
 
-db_path_raw = os.getenv("DATABASE_URL")
-if not db_path_raw:
-    raise ValueError("DATABASE_URL not set in .env file")
-DB_PATH: str = cast(str, db_path_raw)
+"""Dashboard now reads from the `all-expenses` dcc.Store (localStorage) instead
+of querying the database directly. This allows a single fetch on load and fast
+in-memory Pandas operations in callbacks."""
 
 MONTH_OPTIONS = [
     {"label": "January",   "value": "01"},
@@ -32,24 +31,24 @@ MONTH_OPTIONS = [
 ]
 
 def layout():
-    conn = get_conn(DB_PATH)
-    years = get_distinct_years(conn)
-    conn.close()
-
     return html.Div([
         html.H4("Dashboard"),
+        dcc.Store(id="dashboard-years-data"),  # Store year mapping
         dbc.Row([
             dbc.Col(
                 html.Div([
-                    dbc.Label("Year", html_for="dashboard-year"),
-                    dcc.Dropdown(
-                        id="dashboard-year",
-                        options=[{"label": y, "value": y} for y in years],
-                        placeholder="All years",
-                        clearable=True,
+                    dbc.Label("Year", html_for="dashboard-year-slider"),
+                    dcc.Slider(
+                        id="dashboard-year-slider",
+                        min=0,
+                        max=3,
+                        step=1,
+                        marks={},
+                        value=0,
+                        tooltip={"placement": "bottom"}
                     ),
                 ], className="mb-3"),
-                md=4,
+                md=8,
             ),
             dbc.Col(
                 html.Div([
@@ -114,18 +113,82 @@ def _to_label_list(values):
     return ", ".join(str(v) for v in values) if values else "—"
 
 
+def _parse_date_val(v) -> Optional[date]:
+    if v is None:
+        return None
+    if isinstance(v, date):
+        return v
+    try:
+        return datetime.fromisoformat(str(v)).date()
+    except Exception:
+        return None
+
+
+def filter_expenses(all_expenses, selected_position, selected_month, years_list):
+    if not all_expenses:
+        return []
+    df = pd.DataFrame(all_expenses)
+    if df.empty:
+        return []
+    # ensure date column
+    df["date"] = pd.to_datetime(df["date"])  # type: ignore[arg-type]
+
+    # selected_position: 0="All", 1-N map to years_list indices
+    if selected_position and selected_position > 0 and years_list:
+        year_index = selected_position - 1
+        if year_index < len(years_list):
+            df = df[df["date"].dt.year == int(years_list[year_index])]
+    if selected_month:
+        df = df[df["date"].dt.month == int(selected_month)]
+
+    rows = cast(list, df.to_dict("records"))
+    # normalize date objects to date
+    for r in rows:
+        r["date"] = r["date"].date() if hasattr(r["date"], "date") else r["date"]
+    return rows
+
+
+
+@callback(
+    Output("dashboard-year-slider", "min"),
+    Output("dashboard-year-slider", "max"),
+    Output("dashboard-year-slider", "marks"),
+    Output("dashboard-year-slider", "value"),
+    Output("dashboard-years-data", "data"),
+    Input("all-expenses", "data"),
+)
+def populate_year_slider(all_expenses):
+    if not all_expenses:
+        return 0, 1, {0: "All"}, 0, []
+    df = pd.DataFrame(all_expenses)
+    if df.empty:
+        return 0, 1, {0: "All"}, 0, []
+    df["date"] = pd.to_datetime(df["date"])  # type: ignore[arg-type]
+    years = sorted(df["date"].dt.year.unique().tolist())
+    if not years:
+        return 0, 1, {0: "All"}, 0, []
+    # Build marks: position 0 is "All", positions 1-N are the years
+    marks = {0: "All"}
+    for i, year in enumerate(years):
+        marks[i + 1] = str(year)
+    max_pos = len(years)  # 0 (All) + N years = positions 0 to N
+    return 0, max_pos, marks, 0, years
+
+
 @callback(
     Output("dashboard-stats-cards", "children"),
-    Input("dashboard-year", "value"),
+    Input("all-expenses", "data"),
+    Input("dashboard-year-slider", "value"),
     Input("dashboard-month", "value"),
+    Input("dashboard-years-data", "data"),
 )
-def render_dashboard_stats(selected_year, selected_month):
-    conn = get_conn(DB_PATH)
-    rows = [dict(row) for row in get_expense_stats_rows(conn, year=selected_year, month=selected_month)]
-    conn.close()
+def render_dashboard_stats(all_expenses, selected_position, selected_month, years_list):
+    rows = filter_expenses(all_expenses, selected_position, selected_month, years_list)
+    if not rows:
+        return [dbc.Col(dbc.Alert("No expense records found for the selected filter.", color="warning"), md=12)]
 
-    amounts = [row["amount"] for row in rows]
-    descriptions = [row["description"] for row in rows]
+    amounts = [float(row["amount"]) for row in rows if row.get("amount") is not None]
+    descriptions = [row.get("description") or "" for row in rows]
 
     if not amounts:
         return [
@@ -144,8 +207,8 @@ def render_dashboard_stats(selected_year, selected_month):
     description_counts = Counter(descriptions)
     top_descriptions = [f"{desc} ({count})" for desc, count in description_counts.most_common(3)]
     
-    bottom_3_rows = sorted(rows, key=lambda r: r["amount"])[:3]
-    top_3_rows = sorted(rows, key=lambda r: r["amount"], reverse=True)[:3]
+    bottom_3_rows = sorted(rows, key=lambda r: float(r["amount"]))[:3]
+    top_3_rows = sorted(rows, key=lambda r: float(r["amount"]), reverse=True)[:3]
 
     quantitative_cards = [
         _stat_card("Sum", _format_amount(total)),
@@ -211,7 +274,7 @@ def _build_expense_trend_chart(rows, include_empty_days):
         amount_by_date = {}
         for row in sorted_rows:
             date_str = _to_date_str(row["date"])
-            amount_by_date[date_str] = amount_by_date.get(date_str, 0) + row["amount"]
+            amount_by_date[date_str] = amount_by_date.get(date_str, 0) + float(row["amount"])
         
         # Generate all dates in range
         current_date = min_date
@@ -230,13 +293,13 @@ def _build_expense_trend_chart(rows, include_empty_days):
             current_date += timedelta(days=1)
     else:
         # Only plot days with expenses
-        all_dates = [r["date"] for r in sorted_rows]
+        all_dates = [_to_date_str(r["date"]) for r in sorted_rows]
         cumulative = 0
         all_amounts = []
         all_daily_amounts = []
         
         for row in sorted_rows:
-            daily_amount = row["amount"]
+            daily_amount = float(row["amount"])
             cumulative += daily_amount
             all_amounts.append(cumulative)
             all_daily_amounts.append(daily_amount)
@@ -287,13 +350,13 @@ def _build_wordcloud_image(descriptions):
 
 @callback(
     Output("dashboard-chart-row", "children"),
-    Input("dashboard-year", "value"),
+    Input("all-expenses", "data"),
+    Input("dashboard-year-slider", "value"),
     Input("dashboard-month", "value"),
+    Input("dashboard-years-data", "data"),
 )
-def render_chart(selected_year, selected_month):
-    conn = get_conn(DB_PATH)
-    rows = [dict(row) for row in get_expense_stats_rows(conn, year=selected_year, month=selected_month)]
-    conn.close()
+def render_chart(all_expenses, selected_position, selected_month, years_list):
+    rows = filter_expenses(all_expenses, selected_position, selected_month, years_list)
 
     if not rows:
         return [dbc.Col(dbc.Alert("No expense records found.", color="warning"), md=12)]
@@ -312,18 +375,17 @@ def render_chart(selected_year, selected_month):
 
 @callback(
     Output("dashboard-wordcloud-row", "children"),
-    Input("dashboard-year", "value"),
+    Input("all-expenses", "data"),
+    Input("dashboard-year-slider", "value"),
     Input("dashboard-month", "value"),
+    Input("dashboard-years-data", "data"),
 )
-def render_wordcloud(selected_year, selected_month):
-    conn = get_conn(DB_PATH)
-    rows = [dict(row) for row in get_expense_stats_rows(conn, year=selected_year, month=selected_month)]
-    conn.close()
-
+def render_wordcloud(all_expenses, selected_position, selected_month, years_list):
+    rows = filter_expenses(all_expenses, selected_position, selected_month, years_list)
     if not rows:
         return [dbc.Col(dbc.Alert("No expense records found.", color="warning"), md=12)]
 
-    descriptions = [row["description"] for row in rows]
+    descriptions = [r.get("description") or "" for r in rows]
     wordcloud_div = _build_wordcloud_image(descriptions)
     
     return [

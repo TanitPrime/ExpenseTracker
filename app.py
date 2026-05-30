@@ -29,6 +29,8 @@ app.layout = dbc.Container([
     dcc.Store(id="admin-authorized", data=False),
     dcc.Store(id="conflict-tab-trigger"),
     dcc.Store(id="history-tab-trigger"),
+    dcc.Store(id="all-expenses", storage_type="local"),
+    dcc.Location(id="url"),
     dbc.Tabs(id="tabs", active_tab="tab-history", children=[
         dbc.Tab(label="History",   tab_id="tab-history"),
         dbc.Tab(label="Dashboard", tab_id="tab-dashboard"),
@@ -40,6 +42,25 @@ app.layout = dbc.Container([
 ], fluid=True)
 
 from components import dashboard, ingestion_tab, conflict_tab, autofill_tab, history_tab  # noqa
+
+from db.queries import get_all_expenses
+from db.init_db import get_conn as db_get_conn
+
+
+@app.callback(
+    Output("all-expenses", "data"),
+    Input("url", "pathname"),
+    allow_duplicate=True
+)
+def load_all_expenses(_pathname):
+    # Fetch all expenses once and persist to browser localStorage
+    try:
+        conn = db_get_conn(DATABASE_URL)
+        rows = [dict(r) for r in get_all_expenses(conn)]
+        conn.close()
+        return rows
+    except Exception:
+        return []
 
 def _admin_gate_layout(tab_label: str):
     return html.Div([

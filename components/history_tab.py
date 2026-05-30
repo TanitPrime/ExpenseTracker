@@ -1,16 +1,14 @@
 # components/history_tab.py
-import os
-from typing import cast
 import dash
 from dash import html, dcc, Input, Output, callback
 import dash_bootstrap_components as dbc
 import dash_ag_grid as dag
-from db.queries import get_conn, get_distinct_years, get_distinct_months
+import pandas as pd
+from typing import cast
+from datetime import datetime
 
-db_path_raw = os.getenv("DATABASE_URL")
-if not db_path_raw:
-    raise ValueError("DATABASE_URL not set in .env file")
-DB_PATH: str = cast(str, db_path_raw)
+"""History now consumes the `all-expenses` store (localStorage) instead of
+querying the DB on every view. Filtering and sorting are done with Pandas."""
 
 MONTH_OPTIONS = [
     {"label": "January",   "value": "01"},
@@ -28,24 +26,24 @@ MONTH_OPTIONS = [
 ]
 
 def layout():
-    conn = get_conn(DB_PATH)
-    years = get_distinct_years(conn)
-    conn.close()
-
     return html.Div([
         html.H4("Expense History"),
+        dcc.Store(id="history-years-data"),  # Store year mapping
         dbc.Row([
             dbc.Col(
                 html.Div([
-                    dbc.Label("Year", html_for="history-year"),
-                    dcc.Dropdown(
-                        id="history-year",
-                        options=[{"label": y, "value": y} for y in years],
-                        placeholder="All years",
-                        clearable=True,
+                    dbc.Label("Year", html_for="history-year-slider"),
+                    dcc.Slider(
+                        id="history-year-slider",
+                        min=0,
+                        max=3,
+                        step=1,
+                        marks={},
+                        value=0,
+                        tooltip={"placement": "bottom"}
                     ),
                 ], className="mb-3"),
-                md=4,
+                md=8,
             ),
             dbc.Col(
                 html.Div([
@@ -72,15 +70,6 @@ def _build_history_grid(expenses: list):
         {"field": "subcategory",         "headerName": "Subcategory",         "sortable": True, "filter": True},
     ]
 
-    get_row_style = {
-        "styleConditions": [
-            {
-                "condition": "params.data.day_alternate === true",
-                "style": {"backgroundColor": "#d9e7da"}
-            }
-        ]
-    }
-
     return dag.AgGrid(
         id="history-grid",
         rowData=expenses,
@@ -90,42 +79,40 @@ def _build_history_grid(expenses: list):
             "animateRows": True,
             "pagination": True,
             "paginationPageSize": 50,
+            "rowStyle": {"function": "if (params.data.day_alternate) { return { backgroundColor: '#f5f5f5' }; } return {};"}
         },
-        getRowStyle=get_row_style,
         style={"height": "600px"},
     )
 
 @callback(
     Output("history-grid-container", "children"),
+    Input("all-expenses", "data"),
     Input("history-tab-trigger", "data"),
-    Input("history-year", "value"),
+    Input("history-year-slider", "value"),
     Input("history-month", "value"),
+    Input("history-years-data", "data"),
 )
-def load_history(trigger, selected_year, selected_month):
-    conn = get_conn(DB_PATH)
-    
-    # Build query with optional year/month filters
-    query = "SELECT * FROM expenses"
-    filters = []
-    params = []
-    
-    if selected_year:
-        filters.append("strftime('%Y', date) = ?")
-        params.append(selected_year)
+def load_history(all_expenses, trigger, selected_position, selected_month, years_list):
+    if not all_expenses:
+        return dbc.Alert("No expense records available.", color="warning")
+    df = pd.DataFrame(all_expenses)
+    if df.empty:
+        return dbc.Alert("No expense records available.", color="warning")
+
+    df["date"] = pd.to_datetime(df["date"])  # type: ignore[arg-type]
+
+    # selected_position: 0="All", 1-N map to years_list indices
+    if selected_position and selected_position > 0 and years_list:
+        year_index = selected_position - 1
+        if year_index < len(years_list):
+            df = df[df["date"].dt.year == int(years_list[year_index])]
     if selected_month:
-        filters.append("strftime('%m', date) = ?")
-        params.append(selected_month)
-    
-    if filters:
-        query += " WHERE " + " AND ".join(filters)
-    
-    query += " ORDER BY date DESC, id DESC"
-    
-    cursor = conn.cursor()
-    cursor.execute(query, params)
-    expenses = cursor.fetchall()
-    conn.close()
-    expenses_list = [dict(row) for row in expenses]
+        df = df[df["date"].dt.month == int(selected_month)]
+
+    df = df.sort_values(by=["date", "id"], ascending=[False, False])
+    expenses_list = cast(list, df.to_dict("records"))
+    for r in expenses_list:
+        r["date"] = r["date"].date() if hasattr(r["date"], "date") else r["date"]
 
     # Add alternating by day
     current_date = None
@@ -137,3 +124,29 @@ def load_history(trigger, selected_year, selected_month):
         row["day_alternate"] = alternate
 
     return _build_history_grid(expenses_list)
+
+
+@callback(
+    Output("history-year-slider", "min"),
+    Output("history-year-slider", "max"),
+    Output("history-year-slider", "marks"),
+    Output("history-year-slider", "value"),
+    Output("history-years-data", "data"),
+    Input("all-expenses", "data"),
+)
+def populate_history_years(all_expenses):
+    if not all_expenses:
+        return 0, 1, {0: "All"}, 0, []
+    df = pd.DataFrame(all_expenses)
+    if df.empty:
+        return 0, 1, {0: "All"}, 0, []
+    df["date"] = pd.to_datetime(df["date"])  # type: ignore[arg-type]
+    years = sorted(df["date"].dt.year.unique().tolist())
+    if not years:
+        return 0, 1, {0: "All"}, 0, []
+    # Build marks: position 0 is "All", positions 1-N are the years
+    marks = {0: "All"}
+    for i, year in enumerate(years):
+        marks[i + 1] = str(year)
+    max_pos = len(years)  # 0 (All) + N years = positions 0 to N
+    return 0, max_pos, marks, 0, years

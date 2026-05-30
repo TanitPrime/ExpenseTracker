@@ -6,6 +6,8 @@ import dash_ag_grid as dag
 from typing import cast
 import os
 from ingestion.conflict import get_conflict_queue, get_context_rows, resolve_conflict
+from db.queries import get_all_expenses
+from db.init_db import get_conn
 
 db_path_raw = os.getenv("DATABASE_URL")
 if not db_path_raw:
@@ -44,14 +46,8 @@ def _build_grid(context_rows: list):
         {"field": "description", "headerName": "Description", "editable": True, "flex": 1},
     ]
 
-    row_style_conditions = {
-        "styleConditions": [
-            {
-                "condition": "params.data.is_conflict === true",
-                "style": {"backgroundColor": "#ffc107", "fontWeight": "bold"}
-            }
-        ]
-    }
+    # avoid typed getRowStyle to keep linter happy
+    row_style_conditions = None
 
     return dag.AgGrid(
         id="conflict-grid",
@@ -118,6 +114,7 @@ def render_conflict(queue, index):
     Output("conflict-queue",    "data",  allow_duplicate=True),
     Output("conflict-index",    "data",  allow_duplicate=True),
     Output("conflict-feedback", "children"),
+    Output("all-expenses", "data", allow_duplicate=True),
     Input("btn-confirm",        "n_clicks"),
     State("conflict-queue",     "data"),
     State("conflict-index",     "data"),
@@ -128,9 +125,9 @@ def render_conflict(queue, index):
 )
 def confirm_resolution(n_clicks, queue, index, grid_current, grid_original, admin_authorized):
     if not admin_authorized:
-        return queue, index, dbc.Alert("Unauthorized. Please unlock admin access first.", color="danger", duration=4000)
+        return queue, index, dbc.Alert("Unauthorized. Please unlock admin access first.", color="danger", duration=4000), dash.no_update
     if not queue:
-        return queue, index, dash.no_update
+        return queue, index, dash.no_update, dash.no_update
 
     conflict = queue[index]
     resolve_conflict(DB_PATH, conflict["content_hash"], grid_original, grid_current)
@@ -140,7 +137,12 @@ def confirm_resolution(n_clicks, queue, index, grid_current, grid_original, admi
     new_index = min(index, len(new_queue) - 1) if new_queue else 0
 
     feedback = dbc.Alert("✅ Conflict resolved.", color="success", duration=3000)
-    return new_queue, new_index, feedback
+    # refresh all-expenses store
+    conn = get_conn(DB_PATH)
+    all_rows = [dict(r) for r in get_all_expenses(conn)]
+    conn.close()
+
+    return new_queue, new_index, feedback, all_rows
 
 
 # --- add new blank row ---
@@ -159,7 +161,7 @@ def add_row(n_clicks, current_rows, queue, index):
     conflict = queue[index]
     conflict_date = conflict.get("context_date") or conflict.get("created_at", "")[:10]
     new_rows = current_rows + [{"id": None, "date": conflict_date, "amount": "", "description": "", "is_conflict": False}]
-    return _build_grid(new_rows, conflict_date)
+    return _build_grid(new_rows)
 
 
 # --- delete selected rows ---
@@ -192,7 +194,7 @@ def delete_selected_rows(n_clicks, current_rows, selected_rows, queue, index):
 
     conflict = queue[index]
     conflict_date = conflict.get("context_date") or conflict.get("created_at", "")[:10]
-    return _build_grid(remaining, conflict_date)
+    return _build_grid(remaining)
 
 
 # --- skip ---

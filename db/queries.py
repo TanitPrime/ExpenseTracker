@@ -104,6 +104,13 @@ def get_expense_stats_rows(conn, year: Optional[int] = None, month: Optional[int
         cur.execute(query, params)
         return cur.fetchall()
 
+
+def get_all_expenses(conn) -> list:
+    """Return all expenses as rows ordered by date then id."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM expenses ORDER BY date ASC, id ASC")
+        return cur.fetchall()
+
 # --- conflicts ---
 
 def insert_conflict(conn, row: dict):

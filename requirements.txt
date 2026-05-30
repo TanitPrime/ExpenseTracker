@@ -5,3 +5,4 @@ plotly
 wordcloud
 python-dotenv
 psycopg2-binary
+pandas
