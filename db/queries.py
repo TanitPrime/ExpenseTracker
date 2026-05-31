@@ -38,6 +38,28 @@ def insert_expense(conn, row: dict):
             )
         )
 
+def insert_expenses_batch(conn, rows: list[dict]):
+    """Insert multiple expenses in a single batch query."""
+    if not rows:
+        return
+    with conn.cursor() as cur:
+        cur.executemany(
+            """INSERT INTO expenses (date, amount, description, category, subcategory, raw_line, source_file)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            [
+                (
+                    row["date"],
+                    row["amount"],
+                    row.get("description"),
+                    row.get("category"),
+                    row.get("subcategory"),
+                    row.get("raw_line"),
+                    row.get("source_file"),
+                )
+                for row in rows
+            ]
+        )
+
 def update_expense(conn, expense_id: int, row: dict):
     with conn.cursor() as cur:
         cur.execute(
@@ -121,6 +143,28 @@ def insert_conflict(conn, row: dict):
                VALUES (%s, %s, %s, %s, %s)
                ON CONFLICT (content_hash) DO NOTHING""",
             (row["raw_line"], row["source_file"], row["issue"], row["context_date"], row["content_hash"])
+        )
+
+def insert_conflicts_batch(conn, rows: list[dict]):
+    """Insert multiple conflicts in a single batch query."""
+    if not rows:
+        return
+    with conn.cursor() as cur:
+        cur.executemany(
+            """INSERT INTO conflicts_pending
+               (raw_line, source_file, issue, context_date, content_hash)
+               VALUES (%s, %s, %s, %s, %s)
+               ON CONFLICT (content_hash) DO NOTHING""",
+            [
+                (
+                    row["raw_line"],
+                    row["source_file"],
+                    row["issue"],
+                    row["context_date"],
+                    row["content_hash"],
+                )
+                for row in rows
+            ]
         )
 
 def get_all_conflicts(conn) -> list:

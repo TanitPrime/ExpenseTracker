@@ -4,8 +4,8 @@ import re
 from datetime import date, datetime
 from typing import Optional
 from db.queries import (
-    get_conn, get_latest_expense_date, insert_expense,
-    insert_conflict, get_resolution, delete_expenses_by_dates
+    get_conn, get_latest_expense_date, insert_expenses_batch,
+    insert_conflicts_batch, get_resolution, delete_expenses_by_dates
 )
 from parser import parse_contents, ParsedRow, ConflictRow
 
@@ -166,33 +166,41 @@ def ingest_file(db_url: str, content: str | bytes, filename: str) -> dict:
             parsed_rows   = [r for r in parsed_rows   if r.date is not None and r.date >= cutoff]
             conflict_rows = [r for r in conflict_rows if r.context_date is not None and r.context_date >= cutoff]
 
-    # insert clean rows
-    for row in parsed_rows:
-        insert_expense(conn, {
-            "date":        str(row.date),
-            "amount":      row.amount,
-            "description": row.description,
-            "category":    row.category,
-            "subcategory": row.subcategory,
-            "raw_line":    row.raw_line,
-            "source_file": row.source_file,
-        })
-        summary["inserted"] += 1
+    # Batch insert clean rows
+    if parsed_rows:
+        rows_to_insert = [
+            {
+                "date":        str(row.date),
+                "amount":      row.amount,
+                "description": row.description,
+                "category":    row.category,
+                "subcategory": row.subcategory,
+                "raw_line":    row.raw_line,
+                "source_file": row.source_file,
+            }
+            for row in parsed_rows
+        ]
+        insert_expenses_batch(conn, rows_to_insert)
+        summary["inserted"] = len(rows_to_insert)
 
-    # handle conflicts (txt only)
-    for conflict in conflict_rows:
-        prior = get_resolution(conn, conflict.content_hash)
-        if prior:
-            summary["conflicts_remembered"] += 1
-            continue
-        insert_conflict(conn, {
-            "raw_line":     conflict.raw_line,
-            "source_file":  conflict.source_file,
-            "issue":        conflict.issue,
-            "context_date": str(conflict.context_date) if conflict.context_date else None,
-            "content_hash": conflict.content_hash,
-        })
-        summary["conflicts_new"] += 1
+    # Batch insert unresolved conflicts
+    if conflict_rows:
+        unresolved_conflicts = []
+        for conflict in conflict_rows:
+            prior = get_resolution(conn, conflict.content_hash)
+            if prior:
+                summary["conflicts_remembered"] += 1
+            else:
+                unresolved_conflicts.append({
+                    "raw_line":     conflict.raw_line,
+                    "source_file":  conflict.source_file,
+                    "issue":        conflict.issue,
+                    "context_date": str(conflict.context_date) if conflict.context_date else None,
+                    "content_hash": conflict.content_hash,
+                })
+        if unresolved_conflicts:
+            insert_conflicts_batch(conn, unresolved_conflicts)
+            summary["conflicts_new"] = len(unresolved_conflicts)
 
     summary["status"] = "ok"
     conn.commit()
